@@ -14,7 +14,7 @@
           <span class="brand-dot"></span>
           <span>设置</span>
           <span class="spacer"></span>
-          <span class="ver" id="version">v0.2.0</span>
+          <span class="ver" id="version">v0.3.0</span>
         </div>
 
         <div class="sidebar-scroll">
@@ -115,6 +115,19 @@
               <span>最低保留分数：<b id="ai-minscore-label">6</b> / 10</span>
               <input type="range" id="ai-minscore" min="0" max="10" step="1" value="6" />
             </label>
+            <label class="field">
+              <span>引战内容容忍度</span>
+              <select id="ai-strictness">
+                <option value="loose">宽松（引战 ≥8 才拦）</option>
+                <option value="standard">标准（引战 ≥6 拦）</option>
+                <option value="serious">严肃（引战 ≥5 拦）</option>
+                <option value="strict">严格（引战 ≥4 拦）</option>
+              </select>
+            </label>
+            <label class="field">
+              <span>打分缓存（小时内不重复花钱）</span>
+              <input type="number" id="ai-scorettl" min="0" max="168" step="1" value="24" />
+            </label>
             <div class="row-btns">
               <button class="btn" id="btn-ai-test">测试连接</button>
               <button class="btn btn-ghost" id="btn-reapply">重新过滤全部</button>
@@ -200,6 +213,7 @@
           <select id="source-filter"><option value="">全部来源</option></select>
           <span class="spacer"></span>
           <select id="sort-select" title="排序">
+            <option value="smart">智能排序</option>
             <option value="time">按时间</option>
             <option value="hot">按热度</option>
             <option value="score">按 AI 分数</option>
@@ -232,7 +246,19 @@
             <div class="stat-row"><span>AI 调用</span><b id="stat-calls">0 次</b></div>
             <div class="stat-row"><span>今日 AI 成本</span><b id="stat-cost">约 ¥0.0000</b></div>
             <div class="stat-row"><span>AI 状态</span><b id="stat-ai">未启用</b></div>
+            <div class="stat-row"><span>待评分</span><b id="stat-pending">0 条</b></div>
             <button class="btn btn-ghost btn-block mt" id="btn-refresh-stats">立即刷新数据</button>
+          </div>
+
+          <div class="stat-card" id="funnel-card">
+            <div class="stat-title">今日漏斗 <span class="stat-sub" id="funnel-day"></span></div>
+            <div class="funnel" id="funnel-body"></div>
+          </div>
+
+          <div class="stat-card" id="yield-card">
+            <div class="stat-title">数据源产出率</div>
+            <div class="stat-list" id="yield-body"></div>
+            <div class="hint">通过率过低的源会被自动降权，隔几轮再给一次机会</div>
           </div>
         </div>
 

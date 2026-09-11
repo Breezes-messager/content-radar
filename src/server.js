@@ -12,7 +12,7 @@ const { URL } = require('url');
 
 const { loadConfig, saveConfig } = require('./config');
 const store = require('./store');
-const { runFetch, reapplyFilters } = require('./pipeline');
+const { runFetch, reapplyFilters, scoreLoop } = require('./pipeline');
 const { listAdapters } = require('./sources');
 const { AiClient } = require('./ai');
 const { getBuffer } = require('./http');
@@ -419,6 +419,17 @@ async function handleApi(req, res, pathname, query) {
       store.recordAiUsage({ tokensIn: r.usage.tokensIn, tokensOut: r.usage.tokensOut, cost: r.usage.cost });
       store.flush();
       return sendJson(res, 200, { ok: true, summary: r.summary, usage: r.usage });
+    } catch (err) {
+      return sendJson(res, 502, { ok: false, error: err.message });
+    }
+  }
+
+  // --- 后台渐进评分：手动触发 ---
+  if (pathname === '/api/score' && method === 'POST') {
+    try {
+      const result = await scoreLoop({ maxRounds: 40 });
+      store.flush();
+      return sendJson(res, 200, { ok: true, ...result });
     } catch (err) {
       return sendJson(res, 502, { ok: false, error: err.message });
     }

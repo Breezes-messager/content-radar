@@ -45,7 +45,9 @@ const DEFAULTS = {
     baseUrl: 'https://api.deepseek.com/v1',
     apiKey: '',
     model: 'deepseek-chat',
-    minScore: 6, // 低于该分数被剔除
+    minScore: 6, // 兴趣分低于该值被剔除
+    strictness: 'standard', // 引战容忍度：loose(8) / standard(6) / serious(5) / strict(4)
+    scoreTtlHours: 24, // 打分缓存时长，命中不重复花钱
     interests: '', // 自然语言兴趣描述
     batchSize: 10, // 每次送给模型多少条
     priceIn: 1, // 元 / 百万 token（用于成本估算，默认 deepseek-chat 缓存未命中价）

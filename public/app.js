@@ -13,10 +13,11 @@ const state = {
   pageSize: 24,
   view: 'all', // all | starred | filtered
   sourceId: '',
-  sort: 'time',
+  sort: 'smart', // smart（默认）| time | hot | score
   q: '',
   loading: false,
   fetching: false,
+  scoreTimer: null, // 有待评分条目时的轮询计时器
 };
 
 const ACCENTS = [
@@ -167,6 +168,8 @@ function fillConfigForm() {
   $('#ai-interests').value = cfg.ai.interests || '';
   $('#ai-minscore').value = cfg.ai.minScore ?? 6;
   $('#ai-minscore-label').textContent = cfg.ai.minScore ?? 6;
+  $('#ai-strictness').value = cfg.ai.strictness || 'standard';
+  $('#ai-scorettl').value = cfg.ai.scoreTtlHours ?? 24;
 
   $('#fetch-limit').value = cfg.fetch.perSourceLimit ?? 24;
   $('#fetch-interval').value = cfg.fetch.intervalMinutes ?? 0;
@@ -197,6 +200,8 @@ function collectConfigForm() {
   cfg.ai.model = $('#ai-model').value.trim();
   cfg.ai.interests = $('#ai-interests').value.trim();
   cfg.ai.minScore = Number($('#ai-minscore').value);
+  cfg.ai.strictness = $('#ai-strictness').value || 'standard';
+  cfg.ai.scoreTtlHours = Math.max(0, Math.min(168, Number($('#ai-scorettl').value) || 0));
 
   cfg.fetch.perSourceLimit = Math.max(5, Math.min(50, Number($('#fetch-limit').value) || 24));
   cfg.fetch.intervalMinutes = Math.max(0, Number($('#fetch-interval').value) || 0);
@@ -776,6 +781,20 @@ function cardHtml(item) {
   const scoreBadge = score != null ? `<span class="ai-score ${scoreClass}">${score}</span>` : '';
   const sourceTag = `<span class="source-tag ${esc(item.sourceType)}">${esc(item.sourceName)}</span>`;
 
+  // 多维标记：>=5 才显示，避免噪音（低质/营销、引战、戾气）
+  const flags = [];
+  if (item.ai) {
+    if (item.ai.spam >= 5) flags.push(`<span class="flag spam" title="营销/低质 ${item.ai.spam}/10">低质 ${item.ai.spam}</span>`);
+    if (item.ai.flame >= 5) flags.push(`<span class="flag flame" title="引战 ${item.ai.flame}/10">引战 ${item.ai.flame}</span>`);
+    if (typeof item.ai.emo === 'number' && item.ai.emo <= -5) flags.push(`<span class="flag emo" title="情绪净值 ${item.ai.emo}">戾气 ${item.ai.emo}</span>`);
+  }
+  const flagHtml = flags.length ? `<span class="card-flags">${flags.join('')}</span>` : '';
+  // 还没轮到打分时给个占位，免得看起来像打分失败
+  const pendingBadge =
+    score == null && !filtered && state.config.ai && state.config.ai.enabled
+      ? '<span class="ai-score pending" title="已排进后台评分队列">待评</span>'
+      : '';
+
   return `
     <article class="card ${filtered ? 'filtered' : ''} ${hasCover ? '' : 'no-cover'}" data-id="${esc(item.id)}">
       ${
@@ -786,7 +805,7 @@ function cardHtml(item) {
           : ''
       }
       <div class="card-body">
-        <div class="card-head">${sourceTag}${scoreBadge}</div>
+        <div class="card-head">${sourceTag}${scoreBadge}${pendingBadge}${flagHtml}</div>
         <div class="card-title" data-act="open">${esc(item.title)}</div>
         <div class="card-meta">${metaBits.join('')}</div>
         ${summary ? `<div class="card-summary">✨ ${esc(summary)}</div>` : item.desc ? `<div class="card-desc">${esc(item.desc)}</div>` : ''}
@@ -966,6 +985,62 @@ function renderFeed() {
 
 /* ============================== 统计面板 ============================== */
 
+/** 今日漏斗：抓回 → 各阶段剔除 → 最终入池 */
+function renderFunnel(s) {
+  const f = s.funnel;
+  if (!f) return;
+  $('#funnel-day').textContent = f.day || '';
+  const order = ['fetched', 'keyword', 'dedup', 'aiSpam', 'aiFlame', 'aiEmo', 'aiInterest', 'kept'];
+  const parts = order
+    .filter((k) => (f.counts[k] || 0) > 0)
+    .map((k) => {
+      const label = (f.labels && f.labels[k]) || k;
+      const cls = k === 'kept' ? 'funnel-kept' : k === 'fetched' ? 'funnel-in' : 'funnel-out';
+      return `<span class="funnel-step ${cls}"><i>${esc(label)}</i><b>${f.counts[k]}</b></span>`;
+    });
+  $('#funnel-body').innerHTML = parts.length
+    ? parts.join('<span class="funnel-arrow">›</span>')
+    : '<div class="hint">今天还没有抓取记录</div>';
+}
+
+/** 各数据源产出率 */
+function renderYield(s) {
+  const box = $('#yield-body');
+  const rows = [...(s.sourceYield || [])].sort((a, b) => b.yield - a.yield);
+  if (!rows.length) {
+    box.innerHTML = '<div class="hint">还没有统计数据，抓几轮后出现</div>';
+    return;
+  }
+  const names = new Map((state.config.sources || []).map((x) => [x.id, x.name]));
+  box.innerHTML = rows
+    .map((r) => {
+      const name = names.get(r.sourceId) || r.sourceId;
+      const pct = Math.round((r.yield || 0) * 100);
+      const tip = `抓回 ${r.fetched} 条，存活 ${r.kept} 条${r.throttled ? '（本轮被跳过）' : ''}`;
+      return `<div class="yield-row ${r.throttled ? 'throttled' : ''}" title="${esc(tip)}">
+        <span class="yield-name">${esc(name)}</span>
+        <span class="yield-bar"><i style="width:${Math.min(100, pct)}%"></i></span>
+        <span class="yield-pct">${pct}%</span>
+      </div>`;
+    })
+    .join('');
+}
+
+/** 待评分条数：还没评完就定期回来看一眼，评完自动停 */
+function renderPending(s) {
+  const n = Number(s.scoringPending) || 0;
+  $('#stat-pending').textContent = n ? `${n} 条` : '已全部评完';
+  if (n && !state.scoreTimer) {
+    state.scoreTimer = setInterval(async () => {
+      await refreshStats();
+      loadItems();
+    }, 6000);
+  } else if (!n && state.scoreTimer) {
+    clearInterval(state.scoreTimer);
+    state.scoreTimer = null;
+  }
+}
+
 async function refreshStats() {
   try {
     const s = await api('/api/stats');
@@ -976,6 +1051,9 @@ async function refreshStats() {
     $('#stat-calls').textContent = `${s.stats.aiCalls} 次`;
     $('#stat-cost').textContent = `约 ¥${Number(s.stats.aiCost || 0).toFixed(4)}`;
     $('#stat-ai').textContent = state.config.ai.enabled ? (state.config.ai.apiKey ? '已启用' : '缺少 Key') : '未启用';
+    renderFunnel(s);
+    renderYield(s);
+    renderPending(s);
 
     const box = $('#source-stats');
     box.innerHTML = '';
@@ -1440,13 +1518,13 @@ function bindEvents() {
   });
 
   // 自动保存文本类设置
-  ['#kw-any', '#kw-must', '#kw-exclude', '#ai-baseurl', '#ai-apikey', '#ai-model', '#ai-interests', '#fetch-limit', '#fetch-interval'].forEach(
+  ['#kw-any', '#kw-must', '#kw-exclude', '#ai-baseurl', '#ai-apikey', '#ai-model', '#ai-interests', '#fetch-limit', '#fetch-interval', '#ai-scorettl'].forEach(
     (sel) => {
       const el = $(sel);
       if (el) el.addEventListener('input', debouncedPersist);
     },
   );
-  ['#kw-strict', '#ai-enabled', '#chk-reason', '#chk-tray', '#chk-notify'].forEach((sel) => {
+  ['#kw-strict', '#ai-enabled', '#chk-reason', '#chk-tray', '#chk-notify', '#ai-strictness'].forEach((sel) => {
     const el = $(sel);
     if (el) el.addEventListener('change', () => persistConfig());
   });

@@ -1,13 +1,13 @@
 {
   "name": "content-radar",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "多源内容聚合 + 关键词/AI 过滤的信息雷达（Mirror-Sorter 同类自研实现）",
   "main": "electron/main.js",
   "scripts": {
     "start": "node src/server.js",
     "app": "electron .",
-    "test": "node --test test/core.test.js test/ai.test.js test/config.test.js test/features.test.js test/export.test.js test/feedback.test.js",
+    "test": "node --test test/core.test.js test/ai.test.js test/config.test.js test/features.test.js test/export.test.js test/feedback.test.js test/intel.test.js",
     "test:e2e": "node --test test/e2e.test.js",
     "test:live": "node --test test/sources.test.js test/accounts.test.js test/qrlogin.test.js",
     "test:ui": "node --test test/ui.test.js test/ui-features.test.js test/ui-qr.test.js test/ui-source.test.js",

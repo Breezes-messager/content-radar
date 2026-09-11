@@ -7,6 +7,25 @@ const { DATA_DIR } = require('./config');
 const DB_PATH = path.join(DATA_DIR, 'db.json');
 const MAX_ITEMS = 5000; // 超出后按时间淘汰最旧的非收藏项
 
+// 源产出率自适应（借鉴 Mirror-Sorter）：按「抓回 → 存活」通过率动态降权差源
+const SRC_YIELD_MIN = 0.12; // 通过率低于此值的源会被跳过
+const SRC_YIELD_DECAY = 0.7; // 指数移动平均：旧值权重
+const SRC_YIELD_RECOVER = 0.15; // 每被跳过一轮的回升幅度（防永久饿死）
+const SRC_YIELD_SKIP_LIMIT = 3; // 连续跳过这么多轮后强制给一次机会
+
+const FUNNEL_LABELS = {
+  fetched: '抓回候选',
+  keyword: '关键词拦下',
+  dedup: '重复标题',
+  aiSpam: '营销/低质',
+  aiFlame: '引战',
+  aiEmo: '情绪过负',
+  aiInterest: '兴趣不符',
+  kept: '最终入池',
+};
+
+const todayKey = () => new Date().toISOString().slice(0, 10);
+
 const emptyDb = () => ({
   version: 1,
   items: {}, // id -> item
@@ -17,8 +36,12 @@ const emptyDb = () => ({
     aiCost: 0,
     aiFiltered: 0,
     fetchedTotal: 0,
+    scoredTotal: 0,
   },
   meta: { lastFetchAt: null, lastFetchSummary: null },
+  funnel: { day: '', counts: {} }, // 漏斗统计，按天重置
+  sourceYield: {}, // sourceId -> { fetched, kept, yield, skips, updatedAt }
+  scoreQueue: [], // 待打分的条目 id（后台渐进评分用）
 });
 
 let db = emptyDb();
@@ -31,6 +54,10 @@ function load() {
     try {
       const raw = JSON.parse(fs.readFileSync(DB_PATH, 'utf8'));
       db = { ...emptyDb(), ...raw, stats: { ...emptyDb().stats, ...(raw.stats || {}) } };
+      // 老版本 db.json 没有这些字段，补齐结构
+      if (!db.funnel || !db.funnel.counts) db.funnel = { day: '', counts: {} };
+      if (!db.sourceYield || typeof db.sourceYield !== 'object') db.sourceYield = {};
+      if (!Array.isArray(db.scoreQueue)) db.scoreQueue = [];
     } catch (err) {
       console.error('[store] db.json 损坏，已备份并重建:', err.message);
       try {
@@ -152,7 +179,33 @@ function queryItems(opts = {}) {
     hot: (a, b) => (b.stats && b.stats.play ? b.stats.play : 0) - (a.stats && a.stats.play ? a.stats.play : 0),
     score: (a, b) => ((b.ai && b.ai.score) || 0) - ((a.ai && a.ai.score) || 0),
   };
-  list.sort(sorters[sort] || sorters.time);
+
+  if (sort === 'smart') {
+    // 智能排序（借鉴 Mirror-Sorter 的显式加权元组）：
+    // 自己赞过 → 喜欢的作者 → 未读 → 已读；踩过的作者/内容沉底；同级按兴趣分，再按时间
+    const fb = feedbackSamples({ limit: 0 });
+    const likedAuthors = new Set(fb.upAuthors.map((a) => a.name));
+    const dislikedAuthors = new Set(fb.downAuthors.map((a) => a.name));
+
+    const rankOf = (it) => {
+      if (it.feedback === 'down' || (it.author && dislikedAuthors.has(it.author))) return 9;
+      if (it.feedback === 'up') return 0;
+      if (it.author && likedAuthors.has(it.author)) return 1;
+      return it.seen ? 3 : 2;
+    };
+
+    list.sort((a, b) => {
+      const ra = rankOf(a);
+      const rb = rankOf(b);
+      if (ra !== rb) return ra - rb;
+      const sa = (a.ai && a.ai.interest) || 0;
+      const sb = (b.ai && b.ai.interest) || 0;
+      if (sa !== sb) return sb - sa;
+      return (b.publishedAt || b.fetchedAt || 0) - (a.publishedAt || a.fetchedAt || 0);
+    });
+  } else {
+    list.sort(sorters[sort] || sorters.time);
+  }
 
   const total = list.length;
   const size = Math.max(1, Math.min(100, Number(pageSize) || 24));
@@ -181,6 +234,107 @@ function getItem(id) {
   return db.items[id] || null;
 }
 
+/* ---------------------------- 漏斗统计 ---------------------------- */
+
+/** 记一笔漏斗事件（跨天自动重置） */
+function bumpFunnel(key, n = 1) {
+  if (!n) return;
+  const day = todayKey();
+  if (db.funnel.day !== day) db.funnel = { day, counts: {} };
+  db.funnel.counts[key] = (db.funnel.counts[key] || 0) + n;
+  markDirty();
+}
+
+/** 漏斗快照：按顺序返回每个阶段的计数，前端一行展示 */
+function getFunnel() {
+  const day = todayKey();
+  const counts = db.funnel.day === day ? { ...db.funnel.counts } : {};
+  return { day, labels: FUNNEL_LABELS, counts };
+}
+
+/* -------------------------- 源产出率自适应 -------------------------- */
+
+/**
+ * 抓取结束后记录某个源的「抓回 → 存活」通过率
+ * 用指数移动平均，近期表现权重更高（0.3）
+ */
+function recordSourceYield(sourceId, { fetched = 0, kept = 0 } = {}) {
+  if (!sourceId || !fetched) return null;
+  const row = db.sourceYield[sourceId] || { fetched: 0, kept: 0, yield: 0, skips: 0, updatedAt: 0 };
+  const rate = kept / fetched;
+  row.yield = row.updatedAt ? SRC_YIELD_DECAY * row.yield + (1 - SRC_YIELD_DECAY) * rate : rate;
+  row.fetched += fetched;
+  row.kept += kept;
+  row.skips = 0;
+  row.updatedAt = Date.now();
+  db.sourceYield[sourceId] = row;
+  markDirty();
+  return row;
+}
+
+/** 这个源这轮值不值得抓？没统计过的源一律放行（给冷启动机会） */
+function sourceYieldOk(sourceId) {
+  const row = db.sourceYield[sourceId];
+  if (!row || !row.updatedAt) return true;
+  if (row.skips >= SRC_YIELD_SKIP_LIMIT) return true; // 连续跳过太多次，强制给一次机会
+  return row.yield >= SRC_YIELD_MIN;
+}
+
+/** 记一次「因产出率低被跳过」，同时让通过率回升一档（防永久饿死） */
+function markSourceSkipped(sourceId) {
+  const row = db.sourceYield[sourceId];
+  if (!row) return null;
+  row.skips = (row.skips || 0) + 1;
+  row.yield += (1 - row.yield) * SRC_YIELD_RECOVER;
+  markDirty();
+  return row;
+}
+
+/** 各源产出率快照（数据源面板展示用） */
+function sourceYieldStats() {
+  return Object.entries(db.sourceYield).map(([sourceId, r]) => ({
+    sourceId,
+    fetched: r.fetched,
+    kept: r.kept,
+    yield: Number((r.yield || 0).toFixed(3)),
+    throttled: r.updatedAt > 0 && r.yield < SRC_YIELD_MIN && r.skips < SRC_YIELD_SKIP_LIMIT,
+  }));
+}
+
+/* ------------------------ 后台渐进评分队列 ------------------------ */
+
+/** 把待打分的条目塞进队列（去重） */
+function enqueueScoring(ids = []) {
+  const set = new Set(db.scoreQueue);
+  let added = 0;
+  for (const id of ids) {
+    if (!db.items[id] || set.has(id)) continue;
+    set.add(id);
+    added++;
+  }
+  db.scoreQueue = [...set];
+  if (added) markDirty();
+  return added;
+}
+
+/** 取一批待打分的条目（不删除，打分成功后再 ack） */
+function peekScoring(limit = 15) {
+  return db.scoreQueue.slice(0, limit).map((id) => db.items[id]).filter((it) => it && it.status !== 'filtered');
+}
+
+/** 确认这批已处理完（无论成功失败都出队，避免卡住） */
+function ackScoring(ids = []) {
+  const set = new Set(ids);
+  const before = db.scoreQueue.length;
+  db.scoreQueue = db.scoreQueue.filter((id) => !set.has(id));
+  if (db.scoreQueue.length !== before) markDirty();
+  return before - db.scoreQueue.length;
+}
+
+function scoringPending() {
+  return db.scoreQueue.length;
+}
+
 /** 写入 AI 摘要（保留已有的分数/标签） */
 function setSummary(id, summary) {
   const it = db.items[id];
@@ -204,15 +358,32 @@ function setFeedback(id, value) {
   return it;
 }
 
-/** 取最近的赞/踩样本（供 AI 校准打分） */
-function feedbackSamples({ limit = 10 } = {}) {
+/** 取最近的赞/踩样本（供 AI 校准打分）——除了标题，还按作者聚合（借鉴 Mirror-Sorter） */
+function feedbackSamples({ limit = 10, authorLimit = 5 } = {}) {
   const picked = itemsArray().filter((it) => it.feedback === 'up' || it.feedback === 'down');
   const byTime = (a, b) => (b.feedbackAt || 0) - (a.feedbackAt || 0);
   const brief = (it) => ({ title: it.title, source: it.sourceName || '' });
 
+  // 作者维度的偏好信号：比单个标题更稳，也更能泛化
+  const tally = (kind) => {
+    const m = new Map();
+    for (const it of picked) {
+      if (it.feedback !== kind) continue;
+      const name = (it.author || '').trim();
+      if (!name || name === '-') continue;
+      m.set(name, (m.get(name) || 0) + 1);
+    }
+    return [...m.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, authorLimit)
+      .map(([name, n]) => ({ name, count: n }));
+  };
+
   return {
     up: picked.filter((it) => it.feedback === 'up').sort(byTime).slice(0, limit).map(brief),
     down: picked.filter((it) => it.feedback === 'down').sort(byTime).slice(0, limit).map(brief),
+    upAuthors: tally('up'),
+    downAuthors: tally('down'),
     upTotal: picked.filter((it) => it.feedback === 'up').length,
     downTotal: picked.filter((it) => it.feedback === 'down').length,
   };
@@ -267,6 +438,9 @@ function getStats() {
     starred: all.filter((it) => it.starred).length,
     feedbackUp: all.filter((it) => it.feedback === 'up').length,
     feedbackDown: all.filter((it) => it.feedback === 'down').length,
+    scoringPending: db.scoreQueue.length,
+    funnel: getFunnel(),
+    sourceYield: sourceYieldStats(),
     bySource: Object.values(bySource),
     stats: db.stats,
     meta: db.meta,
@@ -296,6 +470,19 @@ module.exports = {
   recordAiUsage,
   getStats,
   setFetchMeta,
+  bumpFunnel,
+  getFunnel,
+  recordSourceYield,
+  sourceYieldOk,
+  markSourceSkipped,
+  sourceYieldStats,
+  enqueueScoring,
+  peekScoring,
+  ackScoring,
+  scoringPending,
+  SRC_YIELD_MIN,
+  SRC_YIELD_SKIP_LIMIT,
+  FUNNEL_LABELS,
   DB_PATH,
   getRaw: () => db,
 };
