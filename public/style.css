@@ -1016,6 +1016,17 @@ select:focus,
   color: var(--accent);
 }
 
+/* 赞 / 踩 反馈：让 AI 学口味 */
+.icon-btn.up.on {
+  color: var(--ok);
+  background: rgba(74, 222, 128, 0.14);
+}
+
+.icon-btn.down.on {
+  color: var(--danger);
+  background: rgba(255, 107, 107, 0.14);
+}
+
 .icon-btn.star.on {
   color: var(--warn);
 }

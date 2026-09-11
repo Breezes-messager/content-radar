@@ -35,8 +35,12 @@ function toMarkdown(d) {
 
   if (d.overview) {
     lines.push('## 综述', '', d.overview, '');
+  } else if (d.aiSkipped === 'no-items') {
+    lines.push('## 综述', '', `（最近 ${d.hours} 小时内没有筛选出的内容）`, '');
+  } else if (d.aiSkipped === 'no-ai') {
+    lines.push('## 综述', '', '（未启用 AI，以下为原始条目）', '');
   } else {
-    lines.push('## 综述', '', '（未启用 AI 或没有可用内容，以下为原始条目）', '');
+    lines.push('## 综述', '', '（AI 综述未生成，以下为原始条目）', '');
   }
 
   lines.push('## 条目', '');
@@ -79,6 +83,7 @@ async function generate({ hours = 24, useAi = true, limit = 60 } = {}) {
     total: items.length,
     bySource: [...counts.entries()].map(([name, count]) => ({ name, count })),
     overview: '',
+    aiSkipped: '',
     items: items.map((it) => ({
       id: it.id,
       title: it.title,
@@ -96,6 +101,11 @@ async function generate({ hours = 24, useAi = true, limit = 60 } = {}) {
 
   const cfg = loadConfig();
   const client = new AiClient(cfg.ai);
+
+  // 没生成综述时记下原因，前端才能给出准确提示（别再让人以为 AI 没开）
+  if (!items.length) digest.aiSkipped = 'no-items';
+  else if (!useAi || !client.ready) digest.aiSkipped = 'no-ai';
+
   if (useAi && client.ready && items.length) {
     try {
       const r = await client.digest(items, { hours });

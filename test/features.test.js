@@ -23,12 +23,14 @@ const bilibili = require('../src/sources/bilibili');
 
 /** 起一个 mock 的 OpenAI 兼容接口 */
 function startMock(handler) {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const server = http.createServer(async (req, res) => {
       let raw = '';
       for await (const chunk of req) raw += chunk;
       handler(raw, res);
     });
+    // 端口被占用等问题要立刻抛错，否则会一直挂着等不到 resolve
+    server.on('error', reject);
     server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port }));
   });
 }
@@ -112,16 +114,35 @@ test('每日简报：不启用 AI 也能生成，并落盘 markdown', { timeout:
 
   assert.ok(d.total >= 2, `应至少收录 2 条，实际 ${d.total}`);
   assert.equal(d.overview, '', '未启用 AI 时综述为空');
+  assert.equal(d.aiSkipped, 'no-ai', '有内容但没启用 AI 时，应标记原因是 no-ai');
   assert.ok(d.bySource.length >= 1, '应有来源分布');
   assert.ok(d.files && fs.existsSync(d.files.markdown), '应写出 markdown 文件');
 
   const md = fs.readFileSync(d.files.markdown, 'utf8');
   assert.ok(md.includes('# 内容雷达简报'), 'markdown 应有标题');
   assert.ok(md.includes('关于具身智能的一点思考'), 'markdown 应包含条目');
+  assert.ok(md.includes('（未启用 AI，以下为原始条目）'), '未启用 AI 时 markdown 应说清原因');
 
   const list = digest.list();
   assert.ok(list.length >= 1, '历史列表应包含刚生成的简报');
   assert.ok(digest.latest(), '应能取到最新简报');
+});
+
+test('每日简报：窗口内没有内容时，原因标为 no-items 而不是「未启用 AI」', { timeout: 60000 }, async (t) => {
+  // AI 是配好的，只是这段时间没内容 —— 以前的版本会误报成「未启用 AI」
+  const { server: mock, port: mockPort } = await startMock(okReply('不该被调用'));
+  t.after(() => mock.close());
+  updateConfig({ ai: { enabled: true, baseUrl: `http://127.0.0.1:${mockPort}/v1`, apiKey: 'sk-test', model: 'mock-model' } });
+
+  // 时间窗口设为 0 小时（起点即此刻）→ 等价于「这段时间没有内容」
+  const d = await digest.generate({ hours: 0, useAi: true });
+  assert.equal(d.total, 0, '窗口内应没有条目');
+  assert.equal(d.overview, '');
+  assert.equal(d.aiSkipped, 'no-items', '没内容时应标记 no-items');
+
+  const md = fs.readFileSync(d.files.markdown, 'utf8');
+  assert.ok(md.includes('小时内没有筛选出的内容'), 'markdown 应说明是时间窗口内没内容');
+  assert.ok(!md.includes('未启用 AI'), '不应再误报成未启用 AI');
 });
 
 test('每日简报：启用 AI 时写入综述', { timeout: 60000 }, async (t) => {
@@ -130,8 +151,16 @@ test('每日简报：启用 AI 时写入综述', { timeout: 60000 }, async (t) =
 
   updateConfig({ ai: { enabled: true, baseUrl: `http://127.0.0.1:${mockPort}/v1`, apiKey: 'sk-test', model: 'mock-model' } });
 
+  // 并发跑多个测试文件时偶发过「读到别的 mock 地址」导致误判，这里先确认配置真的写进去了
+  const { loadConfig } = require('../src/config');
+  assert.equal(
+    loadConfig().ai.baseUrl,
+    `http://127.0.0.1:${mockPort}/v1`,
+    '刚写入的 AI 地址应立刻生效',
+  );
+
   const d = await digest.generate({ hours: 24, useAi: true });
-  assert.ok(d.overview.includes('具身智能'), '综述应来自 AI 返回');
+  assert.ok(d.overview.includes('具身智能'), `综述应来自 AI 返回，实际：${JSON.stringify(d.overview)} / aiError=${d.aiError || '无'}`);
   assert.equal(d.model, 'mock-model');
   assert.ok(d.cost > 0, '应记录成本');
 });

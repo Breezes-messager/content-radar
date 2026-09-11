@@ -27,6 +27,9 @@
 | 内嵌 AI 对话 | ✅ | 右侧「新对话」面板，会带上当前信息池上下文 |
 | 主题 / 强调色 / 栏数 / 卡片大小 | ✅ | 黑夜/白天、8 色强调色、单/双/三/四栏、4 档卡片尺寸 |
 | 定时自动抓取 | ✅ | 设置里填间隔分钟数 |
+| **托盘常驻 + 系统通知** | ✅ | 关窗口缩到托盘继续抓取；有新内容时弹 Windows 通知 |
+| **导出** | ✅ | 收藏 Markdown / 信息池 JSON / 数据源 OPML，同时落盘 `data/exports/` |
+| **赞 / 踩反馈** | ✅ | 卡片上直接标记，作为样本喂给 AI 校准打分（权重高于兴趣描述） |
 
 ---
 
@@ -230,13 +233,17 @@ content-radar/
 ## 测试
 
 ```bash
-npm test                      # 单元测试（core / ai / config）
+npm test                      # 单元测试（core / ai / config / features / export / feedback）
 npm run test:ui               # 布局 UI 测试（真实浏览器）
 npm run test:live             # 数据源真实抓取（贴吧 / 小黑盒）
 npm run test:e2e              # 端到端，会真实访问 B站
 node --test test/security.test.js   # 安全回归（SSRF / CSRF / 路径穿越 / 大请求体）
 node --test test/xss.test.js        # XSS 防护（真实浏览器注入恶意内容）
 node --test test/audit.test.js      # 依赖漏洞审计
+node --test test/export.test.js     # 导出：收藏 Markdown / 信息池 JSON / 数据源 OPML
+node --test test/feedback.test.js   # 赞踩反馈：三态切换、样本统计、prompt 注入、接口落盘
+node --test test/pack.test.js       # 打包成免安装 App（约 380MB）
+node --test test/app-tray.test.js   # 打包版实测：托盘创建 + 导出接口（需先打包；勿与 pack 并发跑）
 ```
 
 所有测试都使用独立临时数据目录（`CONTENT_RADAR_DATA_DIR`），不会污染你的真实数据。
@@ -273,6 +280,8 @@ node --test test/audit.test.js      # 依赖漏洞审计
 - AI 成本是按 token 估算的，与账单可能有小幅偏差。
 - 单机应用，只监听 `127.0.0.1`，没有鉴权，别把端口暴露到公网。
 - 图片通过 `/api/proxy` 代理（B站图床有防盗链），该接口禁止访问内网地址。
+- 赞 / 踩只作为 AI 打分的**参考样本**，不会硬性过滤内容；且只对之后的打分生效，
+  已经打过分的历史条目需要点「重新过滤」才会按新口味重评。
 
 ## 免责声明
 

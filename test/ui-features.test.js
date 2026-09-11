@@ -86,6 +86,32 @@ test('卡片交互：摘要按钮 / 内嵌播放 / 悬停放大 / 简报面板',
   const summaryBtns = await page.$$eval('.card [data-act="summarize"]', (els) => els.length);
   assert.equal(summaryBtns, 2, '两条卡片都应有效摘要按钮');
 
+  // 1.5) 赞 / 踩：点击高亮、写库、统计更新、再点取消
+  assert.equal(await page.$$eval('.card [data-act="up"]', (els) => els.length), 2, '每张卡片都应有点赞按钮');
+  assert.equal(await page.$$eval('.card [data-act="down"]', (els) => els.length), 2, '每张卡片都应有踩按钮');
+
+  await page.click('.card [data-act="up"]');
+  await page.waitForTimeout(800);
+  assert.equal(await page.$$eval('.card [data-act="up"].on', (els) => els.length), 1, '点赞后按钮应高亮');
+  assert.equal(await page.$eval('#stat-feedback', (el) => el.textContent), '1 / 0', '统计应显示 1 个赞');
+
+  const secondCard = (await page.$$('.card'))[1];
+  await secondCard.$eval('[data-act="down"]', (el) => el.click());
+  await page.waitForTimeout(800);
+  assert.equal(await page.$$eval('.card [data-act="down"].on', (els) => els.length), 1, '点踩后按钮应高亮');
+  assert.equal(await page.$eval('#stat-feedback', (el) => el.textContent), '1 / 1', '统计应显示 1 赞 1 踩');
+
+  // 再点一次取消
+  await page.click('.card [data-act="up"]');
+  await page.waitForTimeout(800);
+  assert.equal(await page.$$eval('.card [data-act="up"].on', (els) => els.length), 0, '再点应取消点赞');
+  assert.equal(await page.$eval('#stat-feedback', (el) => el.textContent), '0 / 1', '取消后赞数应回落');
+
+  // 刷新页面：反馈应已落库并回显
+  await page.reload({ waitUntil: 'domcontentloaded' });
+  await page.waitForSelector('.card');
+  assert.equal(await page.$$eval('.card [data-act="down"].on', (els) => els.length), 1, '刷新后踩的状态应还在');
+
   // 2) 只有 B站条目有播放按钮
   const playBtns = await page.$$eval('.card [data-act="play"]', (els) => els.length);
   assert.equal(playBtns, 1, '只有 B站条目应有内嵌播放按钮');

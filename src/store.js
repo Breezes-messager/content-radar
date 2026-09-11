@@ -190,6 +190,34 @@ function setSummary(id, summary) {
   return it;
 }
 
+/**
+ * 用户反馈：赞成 / 反对
+ * 这是让 AI 了解你口味的主要信号——会作为样本注入打分提示词。
+ */
+function setFeedback(id, value) {
+  const it = db.items[id];
+  if (!it) return null;
+  const next = value === 'up' || value === 'down' ? value : null;
+  it.feedback = next;
+  it.feedbackAt = next ? Date.now() : null;
+  markDirty();
+  return it;
+}
+
+/** 取最近的赞/踩样本（供 AI 校准打分） */
+function feedbackSamples({ limit = 10 } = {}) {
+  const picked = itemsArray().filter((it) => it.feedback === 'up' || it.feedback === 'down');
+  const byTime = (a, b) => (b.feedbackAt || 0) - (a.feedbackAt || 0);
+  const brief = (it) => ({ title: it.title, source: it.sourceName || '' });
+
+  return {
+    up: picked.filter((it) => it.feedback === 'up').sort(byTime).slice(0, limit).map(brief),
+    down: picked.filter((it) => it.feedback === 'down').sort(byTime).slice(0, limit).map(brief),
+    upTotal: picked.filter((it) => it.feedback === 'up').length,
+    downTotal: picked.filter((it) => it.feedback === 'down').length,
+  };
+}
+
 /** 取某个时间窗口内的条目（简报用），按发布时间倒序 */
 function recentItems({ hours = 24, onlyKept = true, limit = 200 } = {}) {
   const since = Date.now() - hours * 3600 * 1000;
@@ -237,6 +265,8 @@ function getStats() {
     kept: all.filter((it) => it.status !== 'filtered').length,
     filtered: all.filter((it) => it.status === 'filtered').length,
     starred: all.filter((it) => it.starred).length,
+    feedbackUp: all.filter((it) => it.feedback === 'up').length,
+    feedbackDown: all.filter((it) => it.feedback === 'down').length,
     bySource: Object.values(bySource),
     stats: db.stats,
     meta: db.meta,
@@ -259,6 +289,8 @@ module.exports = {
   markSeen,
   getItem,
   setSummary,
+  setFeedback,
+  feedbackSamples,
   recentItems,
   clearItems,
   recordAiUsage,

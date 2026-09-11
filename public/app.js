@@ -795,6 +795,8 @@ function cardHtml(item) {
         ${playable ? `<div class="card-player" data-player></div>` : ''}
         <div class="card-actions">
           ${playable ? `<button class="icon-btn" data-act="play" title="在卡片里播放">▶</button>` : ''}
+          <button class="icon-btn up ${item.feedback === 'up' ? 'on' : ''}" data-act="up" title="赞：告诉 AI 你喜欢这类内容">👍</button>
+          <button class="icon-btn down ${item.feedback === 'down' ? 'on' : ''}" data-act="down" title="踩：告诉 AI 你不喜欢这类内容">👎</button>
           <button class="icon-btn" data-act="summarize" title="生成 AI 摘要">✨</button>
           <button class="icon-btn star ${item.starred ? 'on' : ''}" data-act="star" title="收藏">★</button>
           <button class="icon-btn" data-act="copy" title="复制链接">⧉</button>
@@ -836,6 +838,23 @@ function bindFeed() {
         toast('已复制链接');
       } catch {
         toast('复制失败，请手动复制', true);
+      }
+    } else if (act === 'up' || act === 'down') {
+      const next = item.feedback === act ? null : act;
+      const prev = item.feedback;
+      item.feedback = next;
+      card.querySelector('[data-act="up"]').classList.toggle('on', next === 'up');
+      card.querySelector('[data-act="down"]').classList.toggle('on', next === 'down');
+      try {
+        const r = await api('/api/items/feedback', { method: 'POST', body: { id, value: next } });
+        const label = next === 'up' ? '已记下：喜欢这类' : next === 'down' ? '已记下：不喜欢这类' : '已取消反馈';
+        toast(`${label}（赞 ${r.upTotal} / 踩 ${r.downTotal}，AI 下次打分会参考）`);
+        refreshStats();
+      } catch (err) {
+        item.feedback = prev;
+        card.querySelector('[data-act="up"]').classList.toggle('on', prev === 'up');
+        card.querySelector('[data-act="down"]').classList.toggle('on', prev === 'down');
+        toast(err.message, true);
       }
     } else if (act === 'summarize') {
       const btn = e.target;
@@ -953,6 +972,7 @@ async function refreshStats() {
     const todayCount = s.bySource.reduce((acc, r) => acc + r.today, 0);
     $('#stat-today').textContent = `${todayCount} 条`;
     $('#stat-filtered').textContent = `${s.stats.aiFiltered} 条`;
+    $('#stat-feedback').textContent = `${s.feedbackUp || 0} / ${s.feedbackDown || 0}`;
     $('#stat-calls').textContent = `${s.stats.aiCalls} 次`;
     $('#stat-cost').textContent = `约 ¥${Number(s.stats.aiCost || 0).toFixed(4)}`;
     $('#stat-ai').textContent = state.config.ai.enabled ? (state.config.ai.apiKey ? '已启用' : '缺少 Key') : '未启用';
@@ -1092,6 +1112,19 @@ function renderMarkdown(text) {
 
 let lastDigest = null;
 
+/**
+ * 没有综述时给出真实原因，避免把「这段时间没内容」误报成「没启用 AI」
+ * （除了 aiError 需要转义，其余都是固定文案或数字）
+ */
+function digestHint(d) {
+  if (!d.total) {
+    return `最近 ${d.hours} 小时没有筛选出的新内容 · 把时间范围调大一些，或先点「立即抓取」`;
+  }
+  if (d.aiError) return `AI 综述失败：${esc(d.aiError)}`;
+  if (d.aiSkipped === 'no-ai') return '（未启用 AI，以下是原始条目）';
+  return '（AI 未生成综述，以下是原始条目）';
+}
+
 function renderDigest(d) {
   const box = $('#digest-body');
   if (!d) {
@@ -1108,11 +1141,7 @@ function renderDigest(d) {
   box.innerHTML = `
     <div class="digest-meta">${esc(time)} · 最近 ${d.hours} 小时 · ${d.total} 条${d.model ? ` · ${esc(d.model)}` : ''}</div>
     ${sources ? `<div class="digest-sources">${sources}</div>` : ''}
-    ${
-      preview
-        ? `<div class="digest-preview">${renderMarkdown(preview)}</div>`
-        : `<div class="hint">${d.aiError ? 'AI 综述失败：' + esc(d.aiError) : '（未启用 AI，只有条目列表）'}</div>`
-    }
+    ${preview ? `<div class="digest-preview">${renderMarkdown(preview)}</div>` : `<div class="hint">${digestHint(d)}</div>`}
     <button class="btn btn-primary btn-block" id="btn-digest-open">查看完整简报（${d.total} 条）</button>
     <div class="digest-list">
       ${(d.items || [])
@@ -1150,7 +1179,7 @@ function openDigestModal(d) {
       ${
         data.overview
           ? `<div class="digest-doc-body">${renderMarkdown(data.overview)}</div>`
-          : `<div class="hint">${data.aiError ? 'AI 综述失败：' + esc(data.aiError) : '（未启用 AI，以下是原始条目）'}</div>`
+          : `<div class="hint">${digestHint(data)}</div>`
       }
       <h4 class="digest-doc-h">全部条目（${(data.items || []).length}）</h4>
       <ol class="digest-doc-list">

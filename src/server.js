@@ -187,6 +187,20 @@ async function handleApi(req, res, pathname, query) {
     return sendJson(res, item ? 200 : 404, { ok: Boolean(item), item });
   }
 
+  // 赞 / 踩：喂给 AI 学口味
+  if (pathname === '/api/items/feedback' && method === 'POST') {
+    const body = await readBody(req);
+    const item = store.setFeedback(body.id, body.value);
+    if (item) store.flush();
+    const samples = store.feedbackSamples({ limit: 0 });
+    return sendJson(res, item ? 200 : 404, {
+      ok: Boolean(item),
+      feedback: item ? item.feedback || null : null,
+      upTotal: samples.upTotal,
+      downTotal: samples.downTotal,
+    });
+  }
+
   if (pathname === '/api/items/seen' && method === 'POST') {
     const body = await readBody(req);
     const item = store.markSeen(body.id);
@@ -443,7 +457,7 @@ async function handleApi(req, res, pathname, query) {
     if (!question.trim()) return sendJson(res, 400, { ok: false, error: '问题不能为空' });
     try {
       const pool = store.queryItems({ pageSize: 12, sort: 'time' }).items;
-      const result = await client.ask(question, pool);
+      const result = await client.ask(question, pool, store.feedbackSamples({ limit: 10 }));
       store.recordAiUsage({ tokensIn: result.usage.tokensIn, tokensOut: result.usage.tokensOut, cost: result.usage.cost });
       return sendJson(res, 200, { ok: true, ...result });
     } catch (err) {

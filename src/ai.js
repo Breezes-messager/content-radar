@@ -15,7 +15,7 @@ function estimateTokens(text) {
   return Math.ceil(cjk + rest / 3.5);
 }
 
-function buildMessages(batch, interests) {
+function buildMessages(batch, interests, feedback = null) {
   const lines = batch
     .map((it, i) => `${i}. 标题：${it.title}\n   作者：${it.author || '-'}\n   简介：${(it.desc || '').slice(0, 120) || '-'}`)
     .join('\n');
@@ -28,7 +28,22 @@ function buildMessages(batch, interests) {
     '必须为每一条输入都输出一条结果，i 与输入序号一致。',
   ].join('\n');
 
+  // 用户的赞/踩是最直接的偏好信号，优先于兴趣描述
+  const feedbackBlock = [];
+  if (feedback && (feedback.up.length || feedback.down.length)) {
+    feedbackBlock.push('用户对历史内容的真实反馈（权重高于兴趣描述，请据此校准）：');
+    if (feedback.up.length) {
+      feedbackBlock.push(`- 点过赞（同类内容应给高分）：${feedback.up.map((f) => f.title).join(' / ')}`);
+    }
+    if (feedback.down.length) {
+      feedbackBlock.push(`- 点过踩（同类内容应给低分）：${feedback.down.map((f) => f.title).join(' / ')}`);
+    }
+    feedbackBlock.push('注意：请归纳这些反馈背后的共同特征（题材、风格、作者类型），而不是只看字面标题。');
+    feedbackBlock.push('');
+  }
+
   const user = [
+    ...feedbackBlock,
     `我的兴趣：${interests || '（未填写，请按“内容质量与信息密度”打分）'}`,
     '',
     '待评估内容：',
@@ -106,8 +121,8 @@ class AiClient {
   }
 
   /** 批量打分。返回 { results: Map<index, {score,tags,reason}>, usage } */
-  async scoreBatch(batch) {
-    const messages = buildMessages(batch, this.cfg.interests);
+  async scoreBatch(batch, feedback = null) {
+    const messages = buildMessages(batch, this.cfg.interests, feedback);
     const r = await this.chat(messages);
     const parsed = extractJson(r.content);
     const map = new Map();
@@ -193,13 +208,22 @@ class AiClient {
   }
 
   /** 自由对话（前端右侧“新对话”面板用） */
-  async ask(question, contextItems = []) {
+  async ask(question, contextItems = [], feedback = null) {
     const ctx = contextItems
       .slice(0, 12)
       .map((it, i) => `${i + 1}. ${it.title}（${it.author || '-'}）`)
       .join('\n');
+
+    const systemParts = ['你是一个资讯分析助手，回答简洁、直接、有信息量。'];
+    if (feedback && (feedback.up.length || feedback.down.length)) {
+      systemParts.push('', '已知这位用户的口味：');
+      if (feedback.up.length) systemParts.push(`- 喜欢：${feedback.up.map((f) => f.title).join(' / ')}`);
+      if (feedback.down.length) systemParts.push(`- 不喜欢：${feedback.down.map((f) => f.title).join(' / ')}`);
+      systemParts.push('回答时可以据此偏向他关心的方向。');
+    }
+
     const messages = [
-      { role: 'system', content: '你是一个资讯分析助手，回答简洁、直接、有信息量。' },
+      { role: 'system', content: systemParts.join('\n') },
       {
         role: 'user',
         content: ctx ? `以下是当前信息池中的内容：\n${ctx}\n\n问题：${question}` : question,

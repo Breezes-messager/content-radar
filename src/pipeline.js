@@ -39,6 +39,8 @@ async function runFetch({ sourceId = '', useAi = null } = {}) {
     const keywordsActive = hasRules(cfg.keywords);
     const aiEnabled = useAi === null ? cfg.ai.enabled : Boolean(useAi);
     const ai = new AiClient(cfg.ai);
+    // 用户的赞/踩样本，用来校准 AI 打分
+    const feedback = store.feedbackSamples({ limit: 10 });
 
     const sources = cfg.sources.filter((s) => s.enabled && (!sourceId || s.id === sourceId));
     if (!sources.length) {
@@ -96,7 +98,7 @@ async function runFetch({ sourceId = '', useAi = null } = {}) {
           for (let i = 0; i < aiCandidates.length; i += batchSize) {
             const batch = aiCandidates.slice(i, i + batchSize);
             try {
-              const { results, usage } = await ai.scoreBatch(batch);
+              const { results, usage } = await ai.scoreBatch(batch, feedback);
               let filteredNow = 0;
               batch.forEach((item, idx) => {
                 const verdict = results.get(idx);
@@ -206,7 +208,7 @@ async function reapplyFilters() {
     for (let i = 0; i < needScore.length; i += batchSize) {
       const batch = needScore.slice(i, i + batchSize);
       try {
-        const { results, usage } = await ai.scoreBatch(batch);
+        const { results, usage } = await ai.scoreBatch(batch, store.feedbackSamples({ limit: 10 }));
         let filteredNow = 0;
         batch.forEach((item, idx) => {
           const v = results.get(idx);
